@@ -1,87 +1,71 @@
-from flask import Flask, jsonify
-import serial
-import time
-import sys
-import csv
-import os
-import threading
+# app.py
+# This script is deployed to Render. It has no access to local serial ports.
 
-# Flask application for CanSat backend
+from flask import Flask, jsonify, request
 from flask_cors import CORS
+
 app = Flask(__name__)
-CORS(app)  # enable all origins for testing
-# Initialize serial port and CSV file
-ser = None
+
+# For production, you should restrict this to your frontend's actual domain
+# For now, allowing all is fine for testing.
+CORS(app) 
+
+# --- IN-MEMORY DATABASE ---
+# This dictionary will store the most recent data received from your gateway.
+# IMPORTANT: This data will be LOST if your Render instance restarts.
+# For a robust application, you should use a real database like PostgreSQL.
 latest_data = {}
-
-CSV_FILE = "data_log.csv"
-CSV_HEADERS = [
-    "Time", "Latitude", "Longitude", "Altitude", "Speed", "Heading", "GPS_Lock",
-    "AccX", "AccY", "AccZ", "MagX", "MagY", "MagZ", "GyroX", "GyroY", "GyroZ",
-    "Pressure", "Altitude_Baro", "Temperature_DHT", "Humidity_DHT"
-]
-
-def init_serial():
-    global ser
-    try:
-        ser = serial.Serial('COM7', 115200, timeout=1)  
-        print(f"[INFO] Serial port {ser.port} opened")
-        time.sleep(2)
-    except serial.SerialException as e:
-        print(f"[ERROR] Serial port failed: {e}", file=sys.stderr)
-        sys.exit(1)
-
-def create_csv_if_needed():
-    if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, mode='w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(CSV_HEADERS)
-        print("[INFO] CSV created with headers")
-
-def serial_reader():
-    global ser, latest_data
-    print("[INFO] Serial reader thread started")
-    while True:
-        if ser and ser.in_waiting > 0:
-            try:
-                line = ser.readline().decode('utf-8').strip()
-                if line.startswith("Received:"):
-                    line = line.replace("Received:", "", 1).strip()
-
-                parts = line.split(',')
-                if len(parts) >= 20:
-                    data = {CSV_HEADERS[i]: parts[i] for i in range(20)}
-                    latest_data = data
-
-                    with open(CSV_FILE, mode='a', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([data[key] for key in CSV_HEADERS])
-
-                    print(f"[LOG] Logged: {data['Time']}")
-                else:
-                    print(f"[WARN] Malformed line ({len(parts)} fields): {line}")
-            except Exception as e:
-                print(f"[ERROR] Serial read error: {e}")
-        else:
-            time.sleep(0.1)
+data_log = [] # Optional: keep a log of the last N readings in memory
 
 @app.route("/")
 def home():
-    return jsonify({"message": "CanSat backend is running!"})
+    """A simple endpoint to check if the server is alive."""
+    return jsonify({
+        "message": "CanSat Cloud Backend is running!",
+        "endpoints": {
+            "/api/latest-data": "GET the most recent data point.",
+            "/api/log": "POST new data points here from the gateway."
+        }
+    })
 
-@app.route("/status")
-def status():
-    return jsonify({"serial_open": ser.is_open if ser else False})
-
-@app.route("/data")
-def get_data():
+@app.route("/api/latest-data", methods=['GET'])
+def get_latest_data():
+    """Endpoint for your frontend web app to get the latest data."""
     if latest_data:
         return jsonify(latest_data)
     else:
-        return jsonify({"message": "No data available yet"})
+        return jsonify({"error": "No data has been received yet."}), 404
 
+@app.route("/api/log", methods=['POST'])
+def log_new_data():
+    """
+    Endpoint for your local gateway.py script to send new data.
+    This endpoint is the new heart of the application.
+    """
+    global latest_data, data_log
+    
+    # Get the JSON data sent from the gateway
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "Invalid request. No JSON data received."}), 400
+    
+    # Update the global 'latest_data' dictionary with the new data
+    latest_data = data
+    
+    # Optional: Add to an in-memory log (e.g., last 100 readings)
+    data_log.append(data)
+    if len(data_log) > 100:
+        data_log.pop(0) # Keep the log from growing indefinitely
+
+    print(f"[DATA RECEIVED] New data logged for Time: {data.get('Time', 'N/A')}")
+    
+    # Return a success message
+    return jsonify({"message": "Data logged successfully"}), 201
+
+# This block is for local testing only.
+# Gunicorn on Render will not use this.
 if __name__ == "__main__":
-    init_serial()
-    create_csv_if_needed()
-    threading.Thread(target=serial_reader, daemon=True).start()
-    app.run(debug=True, use_reloader=False)
+    # Note: Running this locally won't receive data unless you also run the gateway.py
+    # and point its RENDER_API_URL to http://127.0.0.1:5000/api/log
+    app.run(debug=True, port=5000)
