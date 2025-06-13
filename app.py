@@ -68,4 +68,4 @@ def log_new_data():
 if __name__ == "__main__":
     # Note: Running this locally won't receive data unless you also run the gateway.py
     # and point its RENDER_API_URL to http://127.0.0.1:5000/api/log
-    app.run(debug=True, port=5000)
+    app.run(host='0.0.0.0', debug=True)
